@@ -1,0 +1,50 @@
+{
+  "apple": {
+    "seen": 3,
+    "known": 3,
+    "unknown": 0,
+    "starred": false
+  },
+  "beautiful": {
+    "seen": 3,
+    "known": 1,
+    "unknown": 2,
+    "starred": false
+  },
+  "computer": {
+    "seen": 2,
+    "known": 1,
+    "unknown": 1,
+    "starred": true
+  },
+  "difficult": {
+    "seen": 1,
+    "known": 1,
+    "unknown": 0,
+    "starred": false
+  },
+  "environment": {
+    "seen": 1,
+    "known": 1,
+    "unknown": 0,
+    "starred": false
+  },
+  "fantastic": {
+    "seen": 1,
+    "known": 1,
+    "unknown": 0,
+    "starred": false
+  },
+  "government": {
+    "seen": 1,
+    "known": 1,
+    "unknown": 0,
+    "starred": false
+  },
+  "happiness": {
+    "seen": 1,
+    "known": 1,
+    "unknown": 0,
+    "starred": false
+  }
+}
