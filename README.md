@@ -1,5 +1,5 @@
 
-<div style="margin: 20px 0;" align="center">
+<div style="margin: 30px 0;" align="center">
   <img src="./assets/logo.png" width="180" height="180" alt="Vocab TUI Logo"
 ">
 </div>
