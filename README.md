@@ -2,6 +2,7 @@
   <img src="./assets/logo.png" width="120" height="120" alt="Vocab TUI Logo"
 ">
 </div>
+
 # Vocab TUI —— 终端背单词工具（Boss键 + AI讲解）
 
 一个面向命令行/终端的英语词汇学习小工具：支持 **学习模式** 与 **拼写模式**，内置 **Boss 键伪装**（Tab 一键切换到 “tail -f” / “ls -la” 假装界面），支持 **多主题（F6 切换）**，并且可以一键调用 `word_ai.py` 做 **AI 讲解**（可联网检索 Tavily + OpenAI 兼容大模型，或走离线兜底）。还内置 **批量为错题本生成 AI 笔记** 的任务视图。
