@@ -5,7 +5,7 @@ from models import VocabApp, Word, Stats, UISnapshot
 
 
 class UI:
-    """基于curses的用户界面（支持多主题 F6 切换 & 可滚动弹窗）"""
+    """基于curses的用户界面（支持多主题 F6 切换 & 可滚动弹窗 & 批量进度）"""
 
     def __init__(self, stdscr):
         self.stdscr = stdscr
@@ -85,12 +85,13 @@ class UI:
             "2. 只学错题本",
             "3. 查看统计",
             "4. 拼写模式（中文→英文）",
-            "5. 退出",
+            "5. 批量生成错题本AI笔记",
+            "6. 退出",
         ]
         for i, option in enumerate(menu_options):
             self.print_center(5 + i, option, 6)
 
-        self.print_center(self.height - 3, f"主题: {getattr(self, '_theme_name', 'mono')}  |  请输入选项 (1-5):", 6)
+        self.print_center(self.height - 3, f"主题: {getattr(self, '_theme_name', 'mono')}  |  请输入选项 (1-6):", 6)
         self.print_center(self.height - 1, "h=帮助 F6=切换主题 Tab=Boss键 q=退出", 6)
         self.stdscr.refresh()
         return self.get_key()
@@ -202,9 +203,9 @@ class UI:
         self.print_center(self.height - 1, "F6=切换主题  Tab=Boss键", 6)
         self.stdscr.refresh()
 
-    # ================== 可滚动文本弹窗（用于 AI 讲解） ==================
+    # ================== 等待/滚动/批量进度 ==================
     def show_waiting(self, text: str):
-        """显示不阻塞的“等待中”提示（不读取按键）"""
+        """显示“等待中”提示（不读取按键）"""
         self.clear_screen()
         self.draw_border()
         self.print_center(self.height // 2, text, 6)
@@ -220,7 +221,7 @@ class UI:
         """
         可滚动文本查看器：
           - 滚动：↑/↓、PgUp/PgDn、Home/End
-          - 关闭：q / ESC
+          - 关闭：q / ESC / .
           - 其他：F6 切主题（若提供回调）、Tab 老板键（若提供回调，返回后继续）
         """
         # 预处理：按屏宽软换行
@@ -231,7 +232,6 @@ class UI:
             if not ln:
                 lines.append("")
                 continue
-            # 简单 wrap
             cur = ln
             while len(cur) > inner_w:
                 lines.append(cur[:inner_w])
@@ -263,7 +263,6 @@ class UI:
             key = self.get_key()
             # Tab -> 老板键
             if isinstance(key, int):
-                # Tab / Shift+Tab
                 if boss_cb and (key == 9 or (hasattr(curses, 'KEY_TAB') and key == curses.KEY_TAB) or
                                 (hasattr(curses, 'KEY_BTAB') and key == curses.KEY_BTAB)):
                     boss_cb()
@@ -301,8 +300,33 @@ class UI:
             elif key in ('q', 'esc', '.'):
                 break
             else:
-                # 其余键忽略
                 pass
+
+    def draw_batch_progress(self, title: str, logs: List[str], current: int, total: int):
+        """批量任务进度画面（由外部循环驱动刷新）"""
+        self.clear_screen()
+        self.draw_border()
+        self.print_center(1, title, 1)
+
+        # 进度条
+        ratio = 0 if total <= 0 else min(1.0, max(0.0, current / float(total)))
+        bar_w = max(10, self.width - 10)
+        filled = int(bar_w * ratio)
+        bar = "[" + "#" * filled + "-" * (bar_w - filled) + f"] {current}/{total}"
+        self.print_at(3, 2, bar, 3)
+
+        # 日志（显示末尾若干行）
+        max_lines = self.height - 8
+        view = logs[-max_lines:] if logs else []
+        y = 5
+        for ln in view:
+            ln = ln if len(ln) <= self.width - 4 else ln[:self.width - 5] + "…"
+            self.print_at(y, 2, ln, 6)
+            y += 1
+
+        self.print_at(self.height - 3, 2, "q/ESC 终止 | Tab=Boss键 | F6=切主题", 6)
+        self.print_at(self.height - 1, 2, f"主题:{getattr(self,'_theme_name','mono')}", 5)
+        self.stdscr.refresh()
 
     # ================== 通用消息 / 退出确认 ==================
     def show_message(self, message: str, color_pair: int = 6):
@@ -321,7 +345,7 @@ class UI:
         key = self.get_key()
         return key in ('y', 'Y')
 
-    # ================== 输入：宽字符 + 功能键 ==================
+    # ================== 输入：阻塞/非阻塞 ==================
     def get_key(self):
         """
         返回：
@@ -379,6 +403,39 @@ class UI:
         except:
             return ''
 
+    def get_key_nonblocking(self):
+        """非阻塞读取一个按键；无按键时返回 None。"""
+        try:
+            self.stdscr.nodelay(True)
+            try:
+                ch = self.stdscr.get_wch()
+            except curses.error:
+                return None  # 无按键
+            finally:
+                self.stdscr.nodelay(False)
+
+            # 复用 get_key 的解析逻辑（简化：只覆盖常用键）
+            if isinstance(ch, str):
+                if ch == '\t':   return 9
+                if ch == '\x1b': return 'esc'
+                return ch
+            key = ch
+            if key in (9, ord('\t')) or (hasattr(curses, 'KEY_TAB') and key == curses.KEY_TAB):
+                return key
+            if hasattr(curses, 'KEY_BTAB') and key == curses.KEY_BTAB:
+                return key
+            if hasattr(curses, 'KEY_F6') and key == curses.KEY_F6:
+                return 'f6'
+            if key == 27: return 'esc'
+            if 32 <= key <= 126: return chr(key)
+            return None
+        except:
+            try:
+                self.stdscr.nodelay(False)
+            except Exception:
+                pass
+            return None
+
     # ================== 工具 ==================
     def wrap_text(self, text: str, max_width: int) -> list:
         if len(text) <= max_width:
@@ -394,7 +451,7 @@ class UI:
         return lines
 
     def show_help(self):
-        help_width, help_height = 60, 20
+        help_width, help_height = 60, 21
         start_y = max(1, (self.height - help_height) // 2)
         start_x = max(1, (self.width - help_width) // 2)
         win = curses.newwin(help_height, help_width, start_y, start_x)
@@ -413,6 +470,8 @@ class UI:
             "拼写模式(中文→英文):",
             "  字母全部可输入；Enter 判定，Backspace 删除",
             "  F2 切换音标提示，↑/↓ 上一/下一词，ESC 退出", "",
+            "主菜单新增:",
+            "  5. 批量生成错题本 AI 笔记（q/ESC 终止，Tab 老板键，F6 切主题）", "",
             "其他:",
             "  F6           - 切换 UI 主题（mono/green/blue/amber/magenta）",
             "  Tab          - 老板键(伪装屏幕)",

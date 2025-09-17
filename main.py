@@ -5,7 +5,7 @@ import sys
 import time
 import os
 import subprocess
-from typing import Optional
+from typing import Optional, List
 
 from models import VocabApp
 from storage import Storage
@@ -87,7 +87,7 @@ class VocabTUI:
         """保存进度"""
         self.storage.save_progress(self.app.progress)
 
-    # ---------- AI 讲解（学习模式用） ----------
+    # ---------- AI 讲解（学习模式：单词） ----------
     def _ai_help_for_current_word(self):
         """调用 word_ai.py 获取当前单词的讲解，并以弹窗显示"""
         w = self.app.get_current_word()
@@ -111,10 +111,7 @@ class VocabTUI:
         env.setdefault("PYTHONIOENCODING", "utf-8")
 
         try:
-            # 注意：这里是同步调用；若网络较慢，界面会等待
-            proc = subprocess.run(
-                cmd, env=env, capture_output=True, text=True, timeout=90
-            )
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=90)
             if proc.returncode != 0:
                 out = (proc.stdout or "") + (proc.stderr or "")
                 content = f"[word_ai 运行失败]\n命令: {' '.join(cmd)}\n返回码: {proc.returncode}\n\n{out}"
@@ -130,6 +127,97 @@ class VocabTUI:
         self.ui.show_scrollable_text(
             title=title,
             content=content,
+            boss_cb=self._boss_key,
+            theme_cycle_cb=self._cycle_theme,
+        )
+
+    # ---------- 批量：错题本 AI 笔记 ----------
+    def run_batch_ai_notes(self):
+        """
+        批量为“错题本”中的单词生成 AI 笔记（保存为 ai_notes/<word>.md）
+        - 默认跳过已存在的笔记文件
+        - q/ESC 终止；Tab 老板键；F6 切主题
+        """
+        # 准备集合
+        error_words = self.app.filter_error_words()
+        if not error_words:
+            self.ui.show_message("错题本为空，无需生成。", 4)
+            return
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(base_dir, "word_ai.py")
+        if not os.path.exists(script_path):
+            self.ui.show_message("未找到 word_ai.py（请把脚本放在同目录）", 4)
+            return
+
+        # 运行参数
+        out_dir = os.path.join(base_dir, "ai_notes")
+        os.makedirs(out_dir, exist_ok=True)
+        skip_existing = True
+
+        total = len(error_words)
+        logs: List[str] = []
+        aborted = False
+
+        # 初始渲染
+        self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, 0, total)
+
+        for idx, w in enumerate(error_words, start=1):
+            word_text = w.word
+            md_path = os.path.join(out_dir, f"{word_text}.md")
+
+            # 轮询按键（非阻塞）
+            key = self.ui.get_key_nonblocking()
+            if key is not None:
+                if self._is_tab(key):
+                    self._boss_key()
+                    self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx-1, total)
+                elif key == 'f6':
+                    self._cycle_theme()
+                    self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx-1, total)
+                elif key in ('q', 'esc'):
+                    logs.append(f"[abort] 用户终止，已完成 {idx-1}/{total}")
+                    aborted = True
+                    break
+
+            # 跳过已存在
+            if skip_existing and os.path.exists(md_path):
+                logs.append(f"[skip] {word_text}（已存在 {os.path.basename(md_path)}）")
+                self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx, total)
+                continue
+
+            # 执行脚本
+            cmd = [sys.executable, script_path, word_text, "--save"]
+            env = os.environ.copy()
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+
+            try:
+                proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
+                if proc.returncode == 0:
+                    logs.append(f"[ok]   {word_text}")
+                else:
+                    out = (proc.stdout or "") + (proc.stderr or "")
+                    logs.append(f"[fail] {word_text}  code={proc.returncode}  {out.strip()[:120]}")
+            except subprocess.TimeoutExpired:
+                logs.append(f"[timeout] {word_text} >120s")
+            except Exception as e:
+                logs.append(f"[error] {word_text}  {e!r}")
+
+            # 刷新界面
+            self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx, total)
+
+        # 总结
+        if not aborted:
+            done = sum(1 for ln in logs if ln.startswith("[ok]"))
+            fail = sum(1 for ln in logs if ln.startswith("[fail]") or ln.startswith("[error]") or ln.startswith("[timeout]"))
+            skip = sum(1 for ln in logs if ln.startswith("[skip]"))
+            logs.append(f"--- 完成：ok={done}  fail={fail}  skip={skip} / 共 {total}")
+        else:
+            logs.append("--- 已中断")
+
+        self.ui.show_scrollable_text(
+            title="批量生成结果",
+            content="\n".join(logs) if logs else "(无日志)",
             boss_cb=self._boss_key,
             theme_cycle_cb=self._cycle_theme,
         )
@@ -174,7 +262,10 @@ class VocabTUI:
             elif choice == '4':
                 # 拼写模式（中文提示→英文拼写）
                 self.run_typing_mode()
-            elif choice == '5' or choice == 'q':
+            elif choice == '5':
+                # 批量生成错题本 AI 笔记
+                self.run_batch_ai_notes()
+            elif choice == '6' or choice == 'q':
                 # 退出
                 if self.ui.confirm_exit():
                     self.save_progress()
@@ -225,7 +316,7 @@ class VocabTUI:
                 # 快捷进入拼写模式
                 self.run_typing_mode()
             elif key == 'g':
-                # —— 新增：AI 讲解（学习模式）
+                # AI 讲解（学习模式）
                 self._ai_help_for_current_word()
             elif key == 'h':
                 self.ui.show_help()
