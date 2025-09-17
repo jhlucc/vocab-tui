@@ -1,11 +1,11 @@
 import curses
-from typing import List
+from typing import List, Optional, Callable
 
 from models import VocabApp, Word, Stats, UISnapshot
 
 
 class UI:
-    """基于curses的用户界面（支持多主题 F6 切换）"""
+    """基于curses的用户界面（支持多主题 F6 切换 & 可滚动弹窗）"""
 
     def __init__(self, stdscr):
         self.stdscr = stdscr
@@ -134,18 +134,15 @@ class UI:
 
         stats_y = self.height - 8
         progress_text2 = []
-        if progress.seen > 0:
-            progress_text2.append(f"已看: {progress.seen}次")
-        if progress.known > 0:
-            progress_text2.append(f"会了: {progress.known}次")
-        if progress.unknown > 0:
-            progress_text2.append(f"不会: {progress.unknown}次")
+        if progress.seen > 0:    progress_text2.append(f"已看: {progress.seen}次")
+        if progress.known > 0:   progress_text2.append(f"会了: {progress.known}次")
+        if progress.unknown > 0: progress_text2.append(f"不会: {progress.unknown}次")
         if progress_text2:
             self.print_center(stats_y, " | ".join(progress_text2), 6)
 
         help_lines = [
             "操作: s=下一个 w=上一个 p=显示/隐藏释义 r=打乱 t=拼写模式",
-            "      空格/Enter=我会了 x=我不会 ,=加入错题本",
+            "      空格/Enter=我会了 x=我不会 ,=加入错题本 g=AI讲解",
         ]
         for i, line in enumerate(help_lines):
             self.print_center(self.height - 4 + i, line, 6)
@@ -205,6 +202,108 @@ class UI:
         self.print_center(self.height - 1, "F6=切换主题  Tab=Boss键", 6)
         self.stdscr.refresh()
 
+    # ================== 可滚动文本弹窗（用于 AI 讲解） ==================
+    def show_waiting(self, text: str):
+        """显示不阻塞的“等待中”提示（不读取按键）"""
+        self.clear_screen()
+        self.draw_border()
+        self.print_center(self.height // 2, text, 6)
+        self.stdscr.refresh()
+
+    def show_scrollable_text(
+        self,
+        title: str,
+        content: str,
+        boss_cb: Optional[Callable[[], None]] = None,
+        theme_cycle_cb: Optional[Callable[[], None]] = None,
+    ):
+        """
+        可滚动文本查看器：
+          - 滚动：↑/↓、PgUp/PgDn、Home/End
+          - 关闭：q / ESC
+          - 其他：F6 切主题（若提供回调）、Tab 老板键（若提供回调，返回后继续）
+        """
+        # 预处理：按屏宽软换行
+        inner_w = max(10, self.width - 4)
+        lines_raw = content.splitlines() if content else ["(空)"]
+        lines: List[str] = []
+        for ln in lines_raw:
+            if not ln:
+                lines.append("")
+                continue
+            # 简单 wrap
+            cur = ln
+            while len(cur) > inner_w:
+                lines.append(cur[:inner_w])
+                cur = cur[inner_w:]
+            lines.append(cur)
+        total = len(lines)
+
+        offset = 0
+        view_h = max(5, self.height - 6)  # 可视行数
+
+        def redraw():
+            self.clear_screen()
+            self.draw_border()
+            self.print_center(1, title, 1)
+            # 显示主体
+            for i in range(view_h):
+                idx = offset + i
+                if 0 <= idx < total:
+                    self.print_at(3 + i, 2, lines[idx], 6)
+            # 底栏
+            status = f"{offset + 1}-{min(offset + view_h, total)}/{total}"
+            footer = f"↑/↓ PgUp/PgDn Home/End 滚动 | q/ESC 关闭 | Tab=Boss键 | F6=切主题 | 主题:{getattr(self,'_theme_name','mono')}"
+            self.print_at(self.height - 3, 2, status, 5)
+            self.print_at(self.height - 1, 2, footer, 6)
+            self.stdscr.refresh()
+
+        redraw()
+        while True:
+            key = self.get_key()
+            # Tab -> 老板键
+            if isinstance(key, int):
+                # Tab / Shift+Tab
+                if boss_cb and (key == 9 or (hasattr(curses, 'KEY_TAB') and key == curses.KEY_TAB) or
+                                (hasattr(curses, 'KEY_BTAB') and key == curses.KEY_BTAB)):
+                    boss_cb()
+                    try:
+                        curses.flushinp()
+                    except Exception:
+                        pass
+                    redraw()
+                    continue
+
+            if key == 'up':
+                if offset > 0:
+                    offset -= 1
+                    redraw()
+            elif key == 'down':
+                if offset < max(0, total - view_h):
+                    offset += 1
+                    redraw()
+            elif key == 'pgup':
+                offset = max(0, offset - view_h)
+                redraw()
+            elif key == 'pgdn':
+                offset = min(max(0, total - view_h), offset + view_h)
+                redraw()
+            elif key == 'home':
+                offset = 0
+                redraw()
+            elif key == 'end':
+                offset = max(0, total - view_h)
+                redraw()
+            elif key == 'f6':
+                if theme_cycle_cb:
+                    theme_cycle_cb()
+                redraw()
+            elif key in ('q', 'esc', '.'):
+                break
+            else:
+                # 其余键忽略
+                pass
+
     # ================== 通用消息 / 退出确认 ==================
     def show_message(self, message: str, color_pair: int = 6):
         self.clear_screen()
@@ -229,7 +328,7 @@ class UI:
           - Tab：返回整数(9/KEY_TAB/KEY_BTAB)
           - Enter/Space/Esc：'enter'/'space'/'esc'
           - Backspace：'backspace'
-          - F2/F6：'f2'/'f6'；方向键↑/↓：'up'/'down'
+          - F2/F6：'f2'/'f6'；方向键↑/↓：'up'/'down'；PgUp/PgDn：'pgup'/'pgdn'；Home/End：'home'/'end'
           - 其他可打印字符（含中文）：对应字符
           - 未识别：''
         """
@@ -248,10 +347,12 @@ class UI:
                 return ch  # 可打印字符（含中文）
 
             key = ch
+            # Tab / Shift+Tab
             if key in (9, ord('\t')) or (hasattr(curses, 'KEY_TAB') and key == curses.KEY_TAB):
                 return key
             if hasattr(curses, 'KEY_BTAB') and key == curses.KEY_BTAB:
                 return key
+            # 功能键
             if hasattr(curses, 'KEY_F2') and key == curses.KEY_F2:
                 return 'f2'
             if hasattr(curses, 'KEY_F6') and key == curses.KEY_F6:
@@ -260,6 +361,14 @@ class UI:
                 return 'up'
             if hasattr(curses, 'KEY_DOWN') and key == curses.KEY_DOWN:
                 return 'down'
+            if hasattr(curses, 'KEY_PPAGE') and key == curses.KEY_PPAGE:
+                return 'pgup'
+            if hasattr(curses, 'KEY_NPAGE') and key == curses.KEY_NPAGE:
+                return 'pgdn'
+            if hasattr(curses, 'KEY_HOME') and key == curses.KEY_HOME:
+                return 'home'
+            if hasattr(curses, 'KEY_END') and key == curses.KEY_END:
+                return 'end'
 
             if key in (10, 13): return 'enter'
             if key == 32:       return 'space'
@@ -285,7 +394,7 @@ class UI:
         return lines
 
     def show_help(self):
-        help_width, help_height = 60, 19
+        help_width, help_height = 60, 20
         start_y = max(1, (self.height - help_height) // 2)
         start_x = max(1, (self.width - help_width) // 2)
         win = curses.newwin(help_height, help_width, start_y, start_x)
@@ -298,7 +407,9 @@ class UI:
             "  空格 / Enter - '我会了'",
             "  x            - '我不会'",
             "  ,            - 加入错题本",
-            "  r            - 打乱顺序  t - 进入拼写模式", "",
+            "  r            - 打乱顺序",
+            "  t            - 进入拼写模式",
+            "  g            - AI 讲解（联网 + 大模型/后备）", "",
             "拼写模式(中文→英文):",
             "  字母全部可输入；Enter 判定，Backspace 删除",
             "  F2 切换音标提示，↑/↓ 上一/下一词，ESC 退出", "",
@@ -317,4 +428,3 @@ class UI:
         win.getch()
         del win
         self.stdscr.refresh()
-
