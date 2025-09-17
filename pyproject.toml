@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vocab-tui"               
+version = "0.1.0"
+description = "Terminal vocab trainer with boss key and AI explain"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name="JHL"}]
+dependencies = [
+  "requests",
+  'windows-curses; platform_system == "Windows"'  # 让 Windows 也能用 curses
+]
+
+[project.urls]
+Homepage = "https://github.com/jhlucc/vocab-tui"
+
+[project.scripts]
+vocab = "main:main"            
+
+[tool.setuptools]
+py-modules = ["main", "ui", "storage", "models", "boss", "word_ai"]
