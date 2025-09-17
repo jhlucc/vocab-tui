@@ -30,7 +30,6 @@ class Stats:
     starred_count: int = 0
 
     def update_from_progress(self, progress_data: Dict[str, WordProgress]):
-        """从进度数据更新统计信息"""
         self.total_words = len(progress_data)
         self.seen_count = sum(1 for p in progress_data.values() if p.seen > 0)
         self.known_count = sum(1 for p in progress_data.values() if p.known > 0)
@@ -44,12 +43,14 @@ class AppConfig:
     boss_key: str = "TAB"
     boss_style: str = "tail"  # "tail" 或 "ls"
     boss_quit_enabled: bool = False
+    ui_theme: str = "mono"    # 新增：UI 主题（mono/green/blue/amber/magenta）
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "boss_key": self.boss_key,
             "boss_style": self.boss_style,
-            "boss_quit_enabled": self.boss_quit_enabled
+            "boss_quit_enabled": self.boss_quit_enabled,
+            "ui_theme": self.ui_theme,
         }
 
     @classmethod
@@ -58,6 +59,7 @@ class AppConfig:
         config.boss_key = data.get("boss_key", "TAB")
         config.boss_style = data.get("boss_style", "tail")
         config.boss_quit_enabled = data.get("boss_quit_enabled", False)
+        config.ui_theme = data.get("ui_theme", "mono")
         return config
 
 
@@ -67,7 +69,7 @@ class UISnapshot:
     current_index: int = 0
     show_meaning: bool = False
     error_mode: bool = False
-    words_order: List[str] = field(default_factory=list)  # 单词顺序
+    words_order: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -151,7 +153,6 @@ class VocabApp:
                 error_words.append(word)
         return error_words
 
-    # 供 UI 快照/恢复调用
     def create_snapshot(self) -> UISnapshot:
         words_order = [word.word for word in self.words]
         return UISnapshot(
@@ -166,7 +167,6 @@ class VocabApp:
         self.show_meaning = snapshot.show_meaning
         self.error_mode = snapshot.error_mode
 
-        # 恢复单词顺序
         if snapshot.words_order:
             word_dict = {word.word: word for word in all_words}
             restored_words = []
@@ -176,7 +176,6 @@ class VocabApp:
             if restored_words:
                 self.words = restored_words
 
-        # 确保索引在有效范围内
         if self.current_index >= len(self.words):
             self.current_index = max(0, len(self.words) - 1)
 
