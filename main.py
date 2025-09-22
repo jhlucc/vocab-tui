@@ -5,7 +5,7 @@ import sys
 import time
 import os
 import subprocess
-from typing import Optional, List
+from typing import Callable, List, Optional, Tuple
 
 from models import VocabApp
 from storage import Storage
@@ -62,6 +62,27 @@ class VocabTUI:
         self.app.config.ui_theme = new
         self.ui.apply_theme(new)
 
+    def _handle_global_key(
+        self,
+        key,
+        *,
+        after_boss: Optional[Callable[[], None]] = None,
+        after_theme: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        """处理全局快捷键，返回是否已消费该按键"""
+
+        if self._is_tab(key):
+            self._boss_key()
+            if after_boss:
+                after_boss()
+            return True
+        if key == 'f6':
+            self._cycle_theme()
+            if after_theme:
+                after_theme()
+            return True
+        return False
+
     # ---------- 初始化/保存 ----------
     def initialize(self):
         """初始化应用与数据文件"""
@@ -88,6 +109,47 @@ class VocabTUI:
         self.storage.save_progress(self.app.progress)
 
     # ---------- AI 讲解（学习模式：单词） ----------
+    def _resolve_word_ai_script(self) -> Optional[str]:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(base_dir, "word_ai.py")
+        if os.path.exists(script_path):
+            return script_path
+        return None
+
+    def _run_word_ai_command(
+        self,
+        script_path: str,
+        word: str,
+        extra_args: List[str],
+        timeout: int,
+    ) -> Tuple[bool, str, str]:
+        cmd = [sys.executable, script_path, word, *extra_args]
+        env = os.environ.copy()
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "", "timeout"
+        except Exception as exc:
+            return False, f"运行出错：{exc!r}", "error"
+
+        if proc.returncode != 0:
+            out = (proc.stdout or "") + (proc.stderr or "")
+            message = (
+                f"[word_ai 运行失败]\n命令: {' '.join(cmd)}\n"
+                f"返回码: {proc.returncode}\n\n{out}"
+            )
+            return False, message, "failed"
+
+        return True, proc.stdout.strip() or "(无输出)", "success"
+
     def _ai_help_for_current_word(self):
         """调用 word_ai.py 获取当前单词的讲解，并以弹窗显示"""
         w = self.app.get_current_word()
@@ -95,32 +157,26 @@ class VocabTUI:
             self.ui.show_message("没有当前单词", 4)
             return
 
-        # 定位脚本路径
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(base_dir, "word_ai.py")
-        if not os.path.exists(script_path):
+        script_path = self._resolve_word_ai_script()
+        if not script_path:
             self.ui.show_message("未找到 word_ai.py（请把脚本放在同目录）", 4)
             return
 
         # 提示“正在获取…”
         self.ui.show_waiting(f"正在获取 AI 讲解：{w.word} ...")
 
-        # 运行脚本
-        cmd = [sys.executable, script_path, w.word, "--plain"]
-        env = os.environ.copy()
-        env.setdefault("PYTHONIOENCODING", "utf-8")
+        ok, content, reason = self._run_word_ai_command(
+            script_path,
+            w.word,
+            ["--plain"],
+            timeout=90,
+        )
 
-        try:
-            proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=90)
-            if proc.returncode != 0:
-                out = (proc.stdout or "") + (proc.stderr or "")
-                content = f"[word_ai 运行失败]\n命令: {' '.join(cmd)}\n返回码: {proc.returncode}\n\n{out}"
-            else:
-                content = proc.stdout.strip() or "(无输出)"
-        except subprocess.TimeoutExpired:
-            content = "请求超时（>90s）。你可以稍后重试，或检查网络/密钥是否可用。"
-        except Exception as e:
-            content = f"运行出错：{e!r}"
+        if not ok:
+            if reason == "timeout":
+                content = "请求超时（>90s）。你可以稍后重试，或检查网络/密钥是否可用。"
+            elif not content:
+                content = "运行 word_ai.py 失败。"
 
         # 弹窗滚动查看；支持 Tab 老板键与 F6 切主题
         title = f"AI 讲解 - {w.word}"
@@ -144,13 +200,13 @@ class VocabTUI:
             self.ui.show_message("错题本为空，无需生成。", 4)
             return
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        script_path = os.path.join(base_dir, "word_ai.py")
-        if not os.path.exists(script_path):
+        script_path = self._resolve_word_ai_script()
+        if not script_path:
             self.ui.show_message("未找到 word_ai.py（请把脚本放在同目录）", 4)
             return
 
         # 运行参数
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         out_dir = os.path.join(base_dir, "ai_notes")
         os.makedirs(out_dir, exist_ok=True)
         skip_existing = True
@@ -158,9 +214,10 @@ class VocabTUI:
         total = len(error_words)
         logs: List[str] = []
         aborted = False
+        title = "批量生成错题本 AI 笔记"
 
         # 初始渲染
-        self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, 0, total)
+        self.ui.draw_batch_progress(title, logs, 0, total)
 
         for idx, w in enumerate(error_words, start=1):
             word_text = w.word
@@ -169,13 +226,16 @@ class VocabTUI:
             # 轮询按键（非阻塞）
             key = self.ui.get_key_nonblocking()
             if key is not None:
-                if self._is_tab(key):
-                    self._boss_key()
-                    self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx-1, total)
-                elif key == 'f6':
-                    self._cycle_theme()
-                    self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx-1, total)
-                elif key in ('q', 'esc'):
+                def redraw_pending():
+                    self.ui.draw_batch_progress(title, logs, idx - 1, total)
+
+                handled = self._handle_global_key(
+                    key,
+                    after_boss=redraw_pending,
+                    after_theme=redraw_pending,
+                )
+
+                if not handled and key in ('q', 'esc'):
                     logs.append(f"[abort] 用户终止，已完成 {idx-1}/{total}")
                     aborted = True
                     break
@@ -183,28 +243,30 @@ class VocabTUI:
             # 跳过已存在
             if skip_existing and os.path.exists(md_path):
                 logs.append(f"[skip] {word_text}（已存在 {os.path.basename(md_path)}）")
-                self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx, total)
+                self.ui.draw_batch_progress(title, logs, idx, total)
                 continue
 
             # 执行脚本
-            cmd = [sys.executable, script_path, word_text, "--save"]
-            env = os.environ.copy()
-            env.setdefault("PYTHONIOENCODING", "utf-8")
+            ok, message, reason = self._run_word_ai_command(
+                script_path,
+                word_text,
+                ["--save"],
+                timeout=120,
+            )
 
-            try:
-                proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
-                if proc.returncode == 0:
-                    logs.append(f"[ok]   {word_text}")
+            if ok:
+                logs.append(f"[ok]   {word_text}")
+            else:
+                summary = (message or "").strip().replace("\n", " ")
+                if reason == "timeout":
+                    logs.append(f"[timeout] {word_text} >120s")
+                elif reason == "error":
+                    logs.append(f"[error] {word_text}  {summary[:120]}")
                 else:
-                    out = (proc.stdout or "") + (proc.stderr or "")
-                    logs.append(f"[fail] {word_text}  code={proc.returncode}  {out.strip()[:120]}")
-            except subprocess.TimeoutExpired:
-                logs.append(f"[timeout] {word_text} >120s")
-            except Exception as e:
-                logs.append(f"[error] {word_text}  {e!r}")
+                    logs.append(f"[fail] {word_text}  {summary[:120]}")
 
             # 刷新界面
-            self.ui.draw_batch_progress("批量生成错题本 AI 笔记", logs, idx, total)
+            self.ui.draw_batch_progress(title, logs, idx, total)
 
         # 总结
         if not aborted:
@@ -223,57 +285,87 @@ class VocabTUI:
         )
 
     # ---------------- 主菜单 / 学习模式 ----------------
+    def _start_learning_session(self, *, error_only: bool = False):
+        backup_words = None
+        original_error_mode = self.app.error_mode
+
+        if error_only:
+            error_words = self.app.filter_error_words()
+            if not error_words:
+                self.ui.show_message("没有错题本内容！", 4)
+                return
+            backup_words = list(self.app.words)
+            self.app.words = error_words
+
+        try:
+            self.app.error_mode = error_only
+            self.app.current_index = 0
+            self.app.show_meaning = False
+            self.run_learning()
+        finally:
+            if backup_words is not None:
+                self.app.words = backup_words
+            self.app.error_mode = original_error_mode
+
+    def _confirm_exit(self) -> bool:
+        if self.ui.confirm_exit():
+            self.save_progress()
+            return True
+        return False
+
+    def _handle_learning_key(self, key) -> bool:
+        if key == 's':
+            self.next_word()
+        elif key == 'w':
+            self.prev_word()
+        elif key == 'p':
+            self.app.show_meaning = not self.app.show_meaning
+        elif key == ',':
+            self.app.toggle_starred()
+            self.save_progress()
+        elif key in ('enter', 'space'):
+            self._mark_current_word(True)
+        elif key == 'x':
+            self._mark_current_word(False)
+        elif key == 'r':
+            self.shuffle_words()
+        elif key == 't':
+            self.run_typing_mode()
+        elif key == 'g':
+            self._ai_help_for_current_word()
+        elif key == 'h':
+            self.ui.show_help()
+        elif key == '.':
+            return False
+        elif key == 'q':
+            if self._confirm_exit():
+                sys.exit(0)
+        return True
+
     def run_main_menu(self):
         """运行主菜单"""
         while True:
             choice = self.ui.show_main_menu()
 
-            # 全局老板键（Tab）
-            if self._is_tab(choice):
-                self._boss_key()
-                continue
-            if choice == 'f6':
-                self._cycle_theme()
+            if self._handle_global_key(choice):
                 continue
 
             if choice == '1':
-                # 开始学习
-                self.app.error_mode = False
-                self.app.current_index = 0
-                self.app.show_meaning = False
-                self.run_learning()
+                self._start_learning_session(error_only=False)
             elif choice == '2':
-                # 只学错题本
-                error_words = self.app.filter_error_words()
-                if not error_words:
-                    self.ui.show_message("没有错题本内容！", 4)
-                else:
-                    backup = list(self.app.words)
-                    self.app.words = error_words
-                    self.app.error_mode = True
-                    self.app.current_index = 0
-                    self.app.show_meaning = False
-                    self.run_learning()
-                    self.app.words = backup
+                self._start_learning_session(error_only=True)
             elif choice == '3':
-                # 查看统计
                 stats = self.app.get_stats()
                 self.ui.show_stats(stats)
             elif choice == '4':
-                # 拼写模式（中文提示→英文拼写）
                 self.run_typing_mode()
             elif choice == '5':
-                # 批量生成错题本 AI 笔记
                 self.run_batch_ai_notes()
-            elif choice == '6' or choice == 'q':
-                # 退出
-                if self.ui.confirm_exit():
-                    self.save_progress()
+            elif choice in ('6', 'q'):
+                if self._confirm_exit():
                     break
             elif choice == 'h':
                 self.ui.show_help()
-            elif choice == '':
-                continue
 
     def run_learning(self):
         """运行学习模式（浏览式）"""
@@ -285,47 +377,11 @@ class VocabTUI:
             self.ui.show_learning_screen(self.app)
             key = self.ui.get_key()
 
-            # 全局老板键（Tab）
-            if self._is_tab(key):
-                self._boss_key()
-                continue
-            if key == 'f6':
-                self._cycle_theme()
+            if self._handle_global_key(key):
                 continue
 
-            if key == 's':
-                self.next_word()
-            elif key == 'w':
-                self.prev_word()
-            elif key == 'p':
-                self.app.show_meaning = not self.app.show_meaning
-            elif key == ',':
-                self.app.toggle_starred()
-                self.save_progress()
-            elif key == 'enter' or key == 'space':
-                self.app.mark_known()
-                self.save_progress()
-                self.next_word()
-            elif key == 'x':
-                self.app.mark_unknown()
-                self.save_progress()
-                self.next_word()
-            elif key == 'r':
-                self.shuffle_words()
-            elif key == 't':
-                # 快捷进入拼写模式
-                self.run_typing_mode()
-            elif key == 'g':
-                # AI 讲解（学习模式）
-                self._ai_help_for_current_word()
-            elif key == 'h':
-                self.ui.show_help()
-            elif key == '.':
+            if not self._handle_learning_key(key):
                 break
-            elif key == 'q':
-                if self.ui.confirm_exit():
-                    self.save_progress()
-                    sys.exit(0)
 
     # ---------------- 拼写模式（中文 → 英文） ----------------
     def run_typing_mode(self):
@@ -347,13 +403,11 @@ class VocabTUI:
             self.ui.show_typing_screen(self.app, typed, feedback, show_hint)
             key = self.ui.get_key()
 
-            # 全局老板键（Tab）
-            if self._is_tab(key):
-                self._boss_key()
-                feedback = ""  # 回来时清掉上一条提示
-                continue
-            if key == 'f6':
-                self._cycle_theme()
+            def clear_feedback():
+                nonlocal feedback
+                feedback = ""
+
+            if self._handle_global_key(key, after_boss=clear_feedback):
                 continue
 
             # —— 控制键（仅以下这些） ——
@@ -382,26 +436,31 @@ class VocabTUI:
             if key == 'backspace':
                 typed = typed[:-1]
             elif key == 'enter':
-                target = self.app.get_current_word().word if self.app.get_current_word() else ""
+                current = self.app.get_current_word()
+                target = current.word if current else ""
                 if typed.strip().lower() == (target or "").lower():
-                    self.app.mark_known()
-                    self.save_progress()
+                    self._mark_current_word(True)
                     feedback = "✅ 正确"
                     typed = ""
-                    self.next_word()
                 else:
-                    self.app.mark_unknown()
-                    self.save_progress()
+                    self._mark_current_word(False, advance=not stay_on_wrong)
                     feedback = f"❌ 不对，答案：{target}"
                     typed = ""
-                    if not stay_on_wrong:
-                        self.next_word()
             else:
                 # 其他任何可打印字符（含中文/字母/数字/符号），都当作输入
                 if isinstance(key, str) and key not in ('', '\n', '\r'):
                     typed += key
 
     # ---------------- 公共小功能 ----------------
+    def _mark_current_word(self, known: bool, advance: bool = True):
+        if known:
+            self.app.mark_known()
+        else:
+            self.app.mark_unknown()
+        self.save_progress()
+        if advance:
+            self.next_word()
+
     def next_word(self):
         if self.app.current_index < len(self.app.words) - 1:
             self.app.current_index += 1
